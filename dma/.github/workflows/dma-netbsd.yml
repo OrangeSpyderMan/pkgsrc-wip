@@ -1,0 +1,160 @@
+name: Build dma for NetBSD 11.1
+
+# Keep this workflow in your fork, at .github/workflows/dma-netbsd.yml.
+on:
+  workflow_dispatch:
+  push:
+    branches: [dma-0.14]
+    paths:
+      - dma/**
+      - .github/workflows/dma-netbsd.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dma-netbsd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Advance deliberately when updating the build framework.
+      PKGSRC_REV: f500cf202b265b48ab30745d906ee3e15d7507eb
+    steps:
+      - name: Check out this branch's dma recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          sparse-checkout: dma
+
+      - name: Download pinned pkgsrc framework
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          curl --fail --location --retry 3 \
+            "https://codeload.github.com/NetBSD/pkgsrc/tar.gz/${PKGSRC_REV}" \
+            --output pkgsrc.tar.gz
+          printf 'pkgsrc=%s\nwip=%s\n' "$PKGSRC_REV" "$GITHUB_SHA" > output/revisions.txt
+
+      - name: Build and test in NetBSD
+        uses: vmactions/netbsd-vm@5957cf330aef2e6ddc63c604364c99ce2e02b91d # v1
+        with:
+          release: '11.1'
+          arch: x86_64
+          cpu: 2
+          mem: 4096
+          sync: rsync
+          copyback: true
+          envs: PKGSRC_REV
+          prepare: |
+            set -eu
+            # The image supplies /etc/pkg_install.conf for its binary repository.
+            /usr/sbin/pkg_add digest
+          run: |
+            set -eu
+            export PATH=/usr/pkg/sbin:/usr/pkg/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            cd "$GITHUB_WORKSPACE"
+            out="$GITHUB_WORKSPACE/output"
+            mkdir -p "$out"
+            uname -a > "$out/environment.txt"
+            test "$(uname -r)" = 11.1
+            test "$(uname -m)" = amd64
+
+            # Build outside the synchronized workspace, on the VM's own disk.
+            mkdir -p /usr/pkgsrc
+            tar -xzf pkgsrc.tar.gz -C /usr/pkgsrc --strip-components 1
+            mkdir -p /usr/pkgsrc/wip
+            cp -R dma /usr/pkgsrc/wip/dma
+            useradd -m -s /bin/sh builder
+            useradd -m -s /bin/sh submitter
+            mkdir -p /usr/pkgobj /usr/pkgsrc/distfiles /usr/pkgsrc/packages
+            chown -R builder /usr/pkgobj /usr/pkgsrc
+
+            # Native OpenSSL keeps the resulting package's runtime dependencies small.
+            # SU_CMD=false makes unexpected privileged dependency installs fail.
+            cat > /etc/mk.conf <<'MKCONF'
+            WRKOBJDIR= /usr/pkgobj
+            DISTDIR= /usr/pkgsrc/distfiles
+            PACKAGES= /usr/pkgsrc/packages
+            MAKE_JOBS= 2
+            CFLAGS= -O2
+            PREFER_NATIVE= openssl
+            SU_CMD= /usr/bin/false
+            MKCONF
+
+            if su -l builder -c 'set -eu; cd /usr/pkgsrc/wip/dma; make checksum; make build; make stage-install; make package' > "$out/build.log" 2>&1; then
+              cat "$out/build.log"
+            else
+              cat "$out/build.log"
+              exit 1
+            fi
+
+            # Install the generated archive, not the staged files. This exercises
+            # package installation scripts, SPECIAL_PERMS and OWN_DIRS_PERMS.
+            set -- /usr/pkgsrc/packages/All/dma-*.tgz
+            test "$#" -eq 1
+            test -f "$1"
+            package="$1"
+            if pkg_add "$package" > "$out/install.log" 2>&1; then
+              cat "$out/install.log"
+            else
+              cat "$out/install.log"
+              exit 1
+            fi
+
+            cat > /tmp/test-dma.sh <<'TEST'
+            set -eu
+            export PATH=/usr/pkg/sbin:/usr/pkg/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            test "$(stat -f '%Su:%Sg:%Lp' /usr/pkg/sbin/dma)" = root:dma:2555
+            test "$(stat -f '%Su:%Sg:%Lp' /usr/pkg/libexec/dma-mbox-create)" = root:dma:4554
+            test "$(stat -f '%Su:%Sg:%Lp' /var/spool/dma)" = dma:dma:770
+            # A user outside the dma group must still be able to submit.
+            case " $(id -Gn submitter) " in
+              *' dma '*) echo 'submitter unexpectedly belongs to dma' >&2; exit 1 ;;
+            esac
+            pkg_admin check dma
+            pkg_info -B dma
+            ldd /usr/pkg/sbin/dma
+
+            # No relay or mailwrapper changes: -bq queues without sending mail.
+            # VERIFYCERT here also exercises recognition by the installed parser.
+            printf '%s\n' \
+              'SMARTHOST localhost' 'PORT 2525' \
+              'ALIASES /usr/pkg/etc/dma/ci-aliases' \
+              'SPOOLDIR /var/spool/dma' 'MAILNAME ci.example.invalid' \
+              'SECURETRANSFER' 'STARTTLS' 'VERIFYCERT' \
+              > /usr/pkg/etc/dma/dma.conf
+            : > /usr/pkg/etc/dma/ci-aliases
+            chmod 644 /usr/pkg/etc/dma/dma.conf /usr/pkg/etc/dma/ci-aliases
+            test -z "$(find /var/spool/dma -type f -name 'Q*' -print)"
+            printf 'From: ci@example.invalid\nTo: recipient@example.invalid\nSubject: dma CI submission\n\nQueue-only smoke test.\n' > /tmp/dma-message
+            chmod 644 /tmp/dma-message
+            su -l submitter -c '/usr/pkg/sbin/dma -i -bq recipient@example.invalid < /tmp/dma-message'
+            test "$(find /var/spool/dma -type f -name 'Q*' -print | wc -l | tr -d ' ')" = 1
+            /usr/pkg/sbin/dma -bp
+            echo 'PASS: installed permissions, package integrity, VERIFYCERT parsing and ordinary-user queue submission'
+            TEST
+            if sh /tmp/test-dma.sh > "$out/test.log" 2>&1; then
+              cat "$out/test.log"
+            else
+              cat "$out/test.log"
+              exit 1
+            fi
+
+            # Export packages only after installation and submission tests pass.
+            cp "$package" "$out/"
+            cd "$out"
+            sha512 -q "${package##*/}" > "${package##*/}.sha512"
+
+      - name: Upload binary package and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dma-netbsd-11.1-amd64-${{ github.run_number }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
