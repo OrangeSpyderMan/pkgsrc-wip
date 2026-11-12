@@ -53,7 +53,7 @@ jobs:
           prepare: |
             set -eu
             # The image supplies /etc/pkg_install.conf for its binary repository.
-            /usr/sbin/pkg_add digest
+            /usr/sbin/pkg_add digest sudo
           run: |
             set -eu
             export PATH=/usr/pkg/sbin:/usr/pkg/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -71,19 +71,25 @@ jobs:
             cp -R dma /usr/pkgsrc/wip/dma
             useradd -m -s /bin/sh builder
             useradd -m -s /bin/sh submitter
+            # This account exists only in the disposable build VM. pkgsrc
+            # builds dependencies as builder and elevates for their installation.
+            printf '%s\n' 'builder ALL=(root) NOPASSWD: ALL' >> /usr/pkg/etc/sudoers
+            chmod 0440 /usr/pkg/etc/sudoers
+            /usr/pkg/sbin/visudo -c
+            su -l builder -c '/usr/pkg/bin/sudo -n /usr/bin/id -u' > /tmp/dma-ci-root-check
+            test "$(cat /tmp/dma-ci-root-check)" = 0
             mkdir -p /usr/pkgobj /usr/pkgsrc/distfiles /usr/pkgsrc/packages
             chown -R builder /usr/pkgobj /usr/pkgsrc
 
             # Native OpenSSL keeps the resulting package's runtime dependencies small.
-            # SU_CMD=false makes unexpected privileged dependency installs fail.
+            # Elevate only when pkgsrc requests a privileged installation stage.
             cat > /etc/mk.conf <<'MKCONF'
             WRKOBJDIR= /usr/pkgobj
             DISTDIR= /usr/pkgsrc/distfiles
             PACKAGES= /usr/pkgsrc/packages
             MAKE_JOBS= 2
-            CFLAGS= -O2
             PREFER_NATIVE= openssl
-            SU_CMD= /usr/bin/false
+            SU_CMD= /usr/pkg/bin/sudo -n /bin/sh -c
             MKCONF
 
             if su -l builder -c 'set -eu; cd /usr/pkgsrc/wip/dma; make checksum; make build; make stage-install; make package' > "$out/build.log" 2>&1; then
