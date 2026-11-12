@@ -56,6 +56,10 @@ jobs:
             /usr/sbin/pkg_add digest sudo
           run: |
             set -eu
+            # Let the VM action finish successfully so rsync copies logs back.
+            # The following host step propagates the build/test exit status.
+            cat > /tmp/dma-ci-build.sh <<'BUILD'
+            set -eu
             export PATH=/usr/pkg/sbin:/usr/pkg/bin:/usr/sbin:/usr/bin:/sbin:/bin
             cd "$GITHUB_WORKSPACE"
             out="$GITHUB_WORKSPACE/output"
@@ -115,9 +119,21 @@ jobs:
             cat > /tmp/test-dma.sh <<'TEST'
             set -eu
             export PATH=/usr/pkg/sbin:/usr/pkg/bin:/usr/sbin:/usr/bin:/sbin:/bin
-            test "$(stat -f '%Su:%Sg:%Lp' /usr/pkg/sbin/dma)" = root:dma:2555
-            test "$(stat -f '%Su:%Sg:%Lp' /usr/pkg/libexec/dma-mbox-create)" = root:dma:4554
-            test "$(stat -f '%Su:%Sg:%Lp' /var/spool/dma)" = dma:dma:770
+            check_permissions() {
+              path="$1"
+              expected_owner="$2"
+              expected_mode="$3"
+              stat -f '%N %Su:%Sg %Sp (%Op)' "$path"
+              actual_owner=$(stat -f '%Su:%Sg' "$path")
+              actual_mode=$(stat -f '%Dp' "$path")
+              test "$actual_owner" = "$expected_owner"
+              # Full numeric st_mode includes type bits; mask those off while
+              # retaining setuid/setgid/sticky. %Lp omits those special bits.
+              test "$((actual_mode & 07777))" -eq "$((expected_mode))"
+            }
+            check_permissions /usr/pkg/sbin/dma root:dma 02555
+            check_permissions /usr/pkg/libexec/dma-mbox-create root:dma 04554
+            check_permissions /var/spool/dma dma:dma 0770
             # A user outside the dma group must still be able to submit.
             case " $(id -Gn submitter) " in
               *' dma '*) echo 'submitter unexpectedly belongs to dma' >&2; exit 1 ;;
@@ -155,6 +171,21 @@ jobs:
             cp "$package" "$out/"
             cd "$out"
             sha512 -q "${package##*/}" > "${package##*/}.sha512"
+            BUILD
+            build_status=0
+            sh /tmp/dma-ci-build.sh || build_status=$?
+            mkdir -p "$GITHUB_WORKSPACE/output"
+            printf '%s\n' "$build_status" > "$GITHUB_WORKSPACE/output/build-status"
+
+      - name: Check build and test result
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(cat output/build-status)
+          if [[ "$status" != 0 ]]; then
+            echo "NetBSD build or tests failed with exit status $status; see uploaded logs." >&2
+            exit 1
+          fi
 
       - name: Upload binary package and logs
         if: always()
