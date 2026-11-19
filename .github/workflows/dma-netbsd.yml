@@ -131,7 +131,7 @@ jobs:
               # retaining setuid/setgid/sticky. %Lp omits those special bits.
               test "$((actual_mode & 07777))" -eq "$((expected_mode))"
             }
-            check_permissions /usr/pkg/sbin/dma root:dma 02555
+            check_permissions /usr/pkg/libexec/dma root:dma 02555
             check_permissions /usr/pkg/libexec/dma-mbox-create root:dma 04554
             check_permissions /var/spool/dma dma:dma 0770
             # A user outside the dma group must still be able to submit.
@@ -140,7 +140,7 @@ jobs:
             esac
             pkg_admin check dma
             pkg_info -B dma
-            ldd /usr/pkg/sbin/dma
+            ldd /usr/pkg/libexec/dma
 
             # No relay or mailwrapper changes: -bq queues without sending mail.
             # VERIFYCERT here also exercises recognition by the installed parser.
@@ -155,9 +155,9 @@ jobs:
             test -z "$(find /var/spool/dma -type f -name 'Q*' -print)"
             printf 'From: ci@example.invalid\nTo: recipient@example.invalid\nSubject: dma CI submission\n\nQueue-only smoke test.\n' > /tmp/dma-message
             chmod 644 /tmp/dma-message
-            su -l submitter -c '/usr/pkg/sbin/dma -i -bq recipient@example.invalid < /tmp/dma-message'
+            su -l submitter -c '/usr/pkg/libexec/dma -i -bq recipient@example.invalid < /tmp/dma-message'
             test "$(find /var/spool/dma -type f -name 'Q*' -print | wc -l | tr -d ' ')" = 1
-            /usr/pkg/sbin/dma -bp
+            /usr/pkg/libexec/dma -bp
             echo 'PASS: installed permissions, package integrity, VERIFYCERT parsing and ordinary-user queue submission'
             TEST
             if sh /tmp/test-dma.sh > "$out/test.log" 2>&1; then
