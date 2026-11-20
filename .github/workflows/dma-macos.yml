@@ -1,0 +1,27 @@
+name: Test pkgsrc DMA on macOS
+on:
+  push:
+    branches: [ci-macos]
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - name: Build and install DMA
+        run: |
+          set -eu
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          sw_vers
+          uname -m
+          xcrun --show-sdk-version
+
+          git clone --depth 1 https://github.com/NetBSD/pkgsrc.git pkgsrc
+          git clone https://github.com/NetBSD/pkgsrc-wip.git pkgsrc/wip
+          git -C pkgsrc/wip checkout --detach b4b87c251009f06c05cfdcc6fe264cba1c2b5aeb
+          git -C pkgsrc rev-parse HEAD
+
+          cd pkgsrc
+          ./bootstrap/bootstrap --unprivileged --make-jobs 3
+          cd wip/dma
+          "$HOME/pkg/bin/bmake" install
+          test "$("$HOME/pkg/libexec/dma" -bp)" = 'Mail queue is empty'
