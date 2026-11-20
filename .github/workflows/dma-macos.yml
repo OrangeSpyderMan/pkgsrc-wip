@@ -26,5 +26,7 @@ jobs:
           "$HOME/pkg/bin/bmake" patch
           sed -i '' 's/\[MAXDNAME\]/[NS_MAXDNAME]/g' \
               work/dma-0.14/dma.h work/dma-0.14/dns.c
+          sed -i '' 's/st\.st_mtim\.tv_sec/st.st_mtime/g' \
+              work/dma-0.14/dma.c work/dma-0.14/spool.c
           "$HOME/pkg/bin/bmake" MAKE_JOBS=3 install
           test "$("$HOME/pkg/libexec/dma" -bp)" = 'Mail queue is empty'
