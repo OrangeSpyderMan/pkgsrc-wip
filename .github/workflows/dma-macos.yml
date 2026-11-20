@@ -16,17 +16,52 @@ jobs:
           xcrun --show-sdk-version
 
           git clone --depth 1 https://github.com/NetBSD/pkgsrc.git pkgsrc
-          git clone https://github.com/NetBSD/pkgsrc-wip.git pkgsrc/wip
-          git -C pkgsrc/wip checkout --detach b4b87c251009f06c05cfdcc6fe264cba1c2b5aeb
-          git -C pkgsrc rev-parse HEAD
+          git init -q pkgsrc/wip
+          git -C pkgsrc/wip fetch --depth 1 "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git -C pkgsrc/wip checkout --detach FETCH_HEAD
+          test "$(git -C pkgsrc/wip rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'pkgsrc revision: %s\n' "$(git -C pkgsrc rev-parse HEAD)"
+          printf 'pkgsrc-wip revision: %s\n' "$GITHUB_SHA"
 
           cd pkgsrc
           ./bootstrap/bootstrap --unprivileged --make-jobs 3
           cd wip/dma
-          "$HOME/pkg/bin/bmake" patch
-          sed -i '' 's/\[MAXDNAME\]/[NS_MAXDNAME]/g' \
-              work/dma-0.14/dma.h work/dma-0.14/dns.c
-          sed -i '' 's/st\.st_mtim\.tv_sec/st.st_mtime/g' \
-              work/dma-0.14/dma.c work/dma-0.14/spool.c
           "$HOME/pkg/bin/bmake" MAKE_JOBS=3 install
-          test "$("$HOME/pkg/libexec/dma" -bp)" = 'Mail queue is empty'
+
+      - name: Smoke-test DMA default spool
+        run: |
+          set -eu
+          export LC_ALL=C
+          dma="$HOME/pkg/libexec/dma"
+          conf="$HOME/pkg/etc/dma/dma.conf"
+          spool="$HOME/pkg/var/spool/dma"
+          recipient=test@smoke.invalid
+          subject="dma-macos-smoke-${GITHUB_RUN_ID:-$$}"
+
+          if grep -E '^[[:space:]]*SPOOLDIR([[:space:]]|$)' "$conf"; then
+            echo "FAIL: dma.conf overrides the default spool"
+            exit 1
+          fi
+
+          ls -ld "$spool"
+          test -O "$spool"
+          test "$(ls -ld "$spool" | cut -c1-10)" = drwx------
+          test "$("$dma" -bp)" = 'Mail queue is empty'
+
+          printf 'To: %s\nSubject: %s\n\nDMA macOS spool smoke test.\n' "$recipient" "$subject" |
+            "$dma" -i -bq "$recipient"
+          queue=$("$dma" -bp)
+          printf '%s\n' "$queue"
+          printf '%s\n' "$queue" | grep -Eq '^To[[:space:]]*:[[:space:]]*test@smoke\.invalid$'
+
+          for message in "$spool"/M*; do
+            if test -f "$message" && grep -Fx "Subject: $subject" "$message"; then
+              rm "$spool/Q${message##*/M}" "$message"
+              test "$("$dma" -bp)" = 'Mail queue is empty'
+              echo "PASS: DMA used the default spool ($spool), queued the test message, and the queue is empty after cleanup."
+              exit 0
+            fi
+          done
+
+          echo "FAIL: Test message was not found in $spool"
+          exit 1
