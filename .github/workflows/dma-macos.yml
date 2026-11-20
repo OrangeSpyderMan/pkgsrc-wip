@@ -23,5 +23,8 @@ jobs:
           cd pkgsrc
           ./bootstrap/bootstrap --unprivileged --make-jobs 3
           cd wip/dma
-          "$HOME/pkg/bin/bmake" install
+          "$HOME/pkg/bin/bmake" patch
+          sed -i '' 's/\[MAXDNAME\]/[NS_MAXDNAME]/g' \
+              work/dma-0.14/dma.h work/dma-0.14/dns.c
+          HOME/pkg/bin/bmake" MAKE_JOBS=3 install
           test "$("$HOME/pkg/libexec/dma" -bp)" = 'Mail queue is empty'
